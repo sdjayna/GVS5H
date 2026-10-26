@@ -1,10 +1,11 @@
-"""AtCoder-style special judges for the problems in lcb100_hardest_v6 that accept more than one
+"""AtCoder-style special judges for the 7 problems in lcb100_hardest_v6 that accept more than one
 correct output. LiveCodeBench's grader compares output text exactly, so on these problems it can
 reject a correct answer. Each judge decides from the problem statement, not from the expected file.
 
 Grader faults this corrects:
 - abc396_e, abc398_f, abc397_d, arc191_c, arc190_a: "any of them is accepted" (or equivalent).
 - arc192_b: the judge is case-insensitive.
+- arc195_c: a construction problem ("show one example"): any valid placement is correct.
 - abc397_d test 41 (N = 27) expects "3 0", but the problem requires positive integers and none
   exist, so the correct output is -1.
 
@@ -152,12 +153,59 @@ def judge_arc190_a(inp, exp, got):
     return True, "ok"
 
 
+def judge_arc195_c(inp, exp, got):
+    t = inp.split()
+    cases = [(int(t[1 + 2 * i]), int(t[2 + 2 * i])) for i in range(int(t[0]))]
+    e, g = exp.split(), got.split()
+    pe = pg = 0
+    for i, (red, blue) in enumerate(cases):
+        n = red + blue
+        want = e[pe]
+        pe += 1 + (3 * n if want == "Yes" else 0)
+        if pg >= len(g):
+            return False, f"case {i}: output ends early"
+        have = g[pg]
+        pg += 1
+        if have != want:
+            return False, f"case {i}: printed {have!r}, the answer is {want}"
+        if want == "No":
+            continue
+        if pg + 3 * n > len(g):
+            return False, f"case {i}: fewer than {n} pieces printed"
+        pts = []
+        for _ in range(n):
+            p, r, c = g[pg], g[pg + 1], g[pg + 2]
+            pg += 3
+            if p not in ("R", "B"):
+                return False, f"case {i}: piece colour {p!r}"
+            try:
+                r, c = int(r), int(c)
+            except ValueError:
+                return False, f"case {i}: non-integer square"
+            if not (1 <= r <= 10 ** 9 and 1 <= c <= 10 ** 9):
+                return False, f"case {i}: square off the board"
+            pts.append((p, r, c))
+        if sum(p == "R" for p, _, _ in pts) != red:
+            return False, f"case {i}: wrong number of red pieces"
+        if len({(r, c) for _, r, c in pts}) != n:
+            return False, f"case {i}: two pieces on one square"
+        for j, (p, r, c) in enumerate(pts):
+            _, r2, c2 = pts[(j + 1) % n]
+            dr, dc = abs(r - r2), abs(c - c2)
+            if not ((p == "R" and dr + dc == 1) or (p == "B" and dr == 1 and dc == 1)):
+                return False, f"case {i}: piece {j + 1} ({p}) cannot move to piece {(j + 1) % n + 1}"
+    if pg != len(g):
+        return False, "extra output"
+    return True, "ok"
+
+
 def judge_arc192_b(inp, exp, got):
     return got.strip().lower() == exp.strip().lower(), "wrong winner"
 
 
 JUDGES = {"abc396_e": judge_abc396_e, "abc397_d": judge_abc397_d, "abc398_f": judge_abc398_f,
-          "arc191_c": judge_arc191_c, "arc190_a": judge_arc190_a, "arc192_b": judge_arc192_b}
+          "arc191_c": judge_arc191_c, "arc190_a": judge_arc190_a, "arc192_b": judge_arc192_b,
+          "arc195_c": judge_arc195_c}
 
 
 def run(code, tests, judge):
