@@ -159,6 +159,30 @@ WORKER_SELF_LIMITS = (
     "samples after you reply. Verify by reasoning and hand-traced examples, and never claim "
     "to have executed anything."
 )
+EXEC = os.environ.get("MULTIAGENT_EXEC_CHECKS") == "1"
+STRESS_CASES = int(os.environ.get("MULTIAGENT_STRESS_CASES", "40"))
+STRESS_TIME_LIMIT = float(os.environ.get("MULTIAGENT_STRESS_TIME_LIMIT", "6"))
+EXEC_LIMITS = (
+    "Workers cannot run anything themselves. After each worker, the harness runs the solution "
+    "on the public samples and, when the worker supplies them, runs a brute-force solver "
+    "(### BRUTE) against the solution on small random inputs from a generator (### GEN), and "
+    "times the solution on one maximum-size input (### BIGGEN). To verify, ask a worker to "
+    "write a brute force and generators; never assign a task that needs anything run."
+)
+EXEC_SELF = (
+    "You cannot run code yourself, but the harness will run the optional ### BRUTE, ### GEN "
+    "and ### BIGGEN sections for you: BRUTE against your CODE on generated small inputs, and "
+    "CODE on the BIGGEN input against the time limit. Include them whenever the solution is not "
+    "trivially correct, keep BRUTE simple enough to be obviously right, and never claim to have "
+    "executed anything."
+)
+EXEC_FMT = (
+    "### BRUTE\n```python\n<optional: a slow but obviously correct solver for small inputs, "
+    "same input and output format as CODE>\n```\n"
+    "### GEN\n```python\n<optional: prints ONE random small valid input; seed the random "
+    "generator with int(sys.argv[1])>\n```\n"
+    "### BIGGEN\n```python\n<optional: prints ONE maximum-size valid input>\n```\n"
+)
 MULTI_OK = re.compile(
     r"(print(ing)?|output(ting)?)\s+any\b|any\s+(one\s+)?of\s+them\s+(is|are|will\s+be|may\s+be)"
     r"|if\s+there\s+are\s+multiple\s+(solutions|answers|ways|such|good|valid)"
@@ -206,7 +230,7 @@ def _primary_plan(problem, spec, ws, log):
     if _strict():
         sys += _format_rule("PLAN", "TASKS")
     if FIXES and kind == "code":
-        sys += "\n" + WORKER_LIMITS
+        sys += "\n" + (EXEC_LIMITS if EXEC else WORKER_LIMITS)
     reply = _chat(ws, "primary_plan", [
         {"role": "system", "content": sys},
         {"role": "user", "content": problem},
@@ -275,7 +299,7 @@ def _primary_manage(problem, spec, ws, tasks, proposals, last_summary, log):
     if _strict():
         sys += _format_rule("STATUS", "NEXT", "TASKS")
     if FIXES and kind == "code":
-        sys += "\n" + WORKER_LIMITS
+        sys += "\n" + (EXEC_LIMITS if EXEC else WORKER_LIMITS)
     reply = _chat(ws, "primary_manage", [
         {"role": "system", "content": sys},
         {"role": "user", "content": (
@@ -331,6 +355,7 @@ def _worker(problem, spec, ws, task, log, finalize=False):
     if kind == "code":
         out_fmt = (
             "### CODE\n```python\n<the FULL updated self-contained program>\n```\n"
+            + (EXEC_FMT if (FIXES and EXEC) else "")
             + notes_fmt +
             "### NEXT\n<bullet list of remaining steps, or 'none'>\n### STATUS\n<solved|continue>"
         )
@@ -353,7 +378,7 @@ def _worker(problem, spec, ws, task, log, finalize=False):
         f"Respond with EXACTLY these sections:\n{out_fmt}"
     )
     if FIXES and kind == "code":
-        sys += "\n" + WORKER_SELF_LIMITS
+        sys += "\n" + (EXEC_SELF if EXEC else WORKER_SELF_LIMITS)
     wmeta = {}
     reply = _chat(ws, "finalize" if finalize else f"worker:{task['id']}", [
         {"role": "system", "content": sys},
@@ -370,6 +395,11 @@ def _worker(problem, spec, ws, task, log, finalize=False):
         if code:
             _write(ws, "solution.py", code)
             wrote = True
+        if FIXES and EXEC:
+            for name, fname in (("BRUTE", "brute.py"), ("GEN", "gen.py"), ("BIGGEN", "biggen.py")):
+                extra = _extract_py(sec.get(name, ""))
+                if extra:
+                    _write(ws, fname, extra)
     else:
         ans = sec.get("ANSWER", "").strip()
         if not ans and ANS_RE.search(reply) and len(reply) < MAX_ANSWER_CHARS:
@@ -448,6 +478,88 @@ def _sample_feedback(res):
                 e=f.get("expected", ""), g=f.get("got", ""))
 
 
+def _run_py(path, stdin_text, args=(), timeout=10):
+    """Run a Python file; return (stdout or None, seconds, error or None)."""
+    t0 = time.time()
+    try:
+        r = subprocess.run([sys.executable, path, *args], input=stdin_text, capture_output=True,
+                           text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, timeout, "timeout"
+    if r.returncode != 0:
+        return None, time.time() - t0, (r.stderr or "runtime error")[-300:]
+    return r.stdout, time.time() - t0, None
+
+
+def _too_slow(st):
+    b = (st or {}).get("big")
+    return bool(b) and (b["error"] == "timeout" or b["seconds"] > STRESS_TIME_LIMIT)
+
+
+def _stress_check(ws, multi):
+    """Brute force against the solution on generated inputs, and the solution timed on a big input."""
+    out = {"ran": False}
+    if not _read(ws, "solution.py").strip():
+        return out
+    sol, brute, gen, big = (os.path.join(ws, f) for f in ("solution.py", "brute.py", "gen.py", "biggen.py"))
+    have = lambda name: os.path.exists(os.path.join(ws, name)) and _read(ws, name).strip()
+    if have("gen.py") and have("brute.py"):
+        if multi:
+            out["skipped"] = "this problem accepts more than one correct output"
+        else:
+            out["ran"], checked = True, 0
+            for seed in range(1, STRESS_CASES + 1):
+                inp, _, _ = _run_py(gen, "", (str(seed),), timeout=5)
+                if inp is None:
+                    out["gen_errors"] = out.get("gen_errors", 0) + 1
+                    continue
+                want, _, _ = _run_py(brute, inp, timeout=10)
+                if want is None:
+                    out["brute_errors"] = out.get("brute_errors", 0) + 1
+                    continue
+                got, _, err = _run_py(sol, inp, timeout=10)
+                checked += 1
+                if got is None or got.split() != want.split():
+                    out["mismatch"] = {"input": inp[:600], "brute": want.strip()[:300],
+                                       "solution": (got.strip() if got is not None else f"<{err}>")[:300]}
+                    break
+            out["checked"] = checked
+    if have("biggen.py"):
+        inp, _, err = _run_py(big, "", timeout=30)
+        if inp is not None:
+            _, secs, err = _run_py(sol, inp, timeout=STRESS_TIME_LIMIT * 2)
+            out["ran"] = True
+            out["big"] = {"seconds": round(secs, 2), "error": err, "input_chars": len(inp)}
+    return out
+
+
+def _stress_feedback(st):
+    if not st or not (st.get("ran") or st.get("skipped")):
+        return ""
+    parts = []
+    m = st.get("mismatch")
+    if m:
+        parts.append(f"STRESS TEST: the brute force and the solution DISAGREE on a generated input: "
+                     f"input={m['input']!r} brute={m['brute']!r} solution={m['solution']!r}. One of them "
+                     f"is wrong: work out which by hand before changing the solution.")
+    elif "checked" in st:
+        skipped = st.get("brute_errors", 0) + st.get("gen_errors", 0)
+        parts.append(f"STRESS TEST: brute force and solution agree on all {st['checked']} generated inputs"
+                     + (f" ({skipped} skipped because the brute force or generator failed)" if skipped else "") + ".")
+    if st.get("skipped"):
+        parts.append(f"STRESS TEST skipped: {st['skipped']}.")
+    b = st.get("big")
+    if b:
+        if _too_slow(st):
+            parts.append(f"TIMING: on a maximum-size input ({b['input_chars']} characters) the solution took "
+                         f"more than {STRESS_TIME_LIMIT:g} s: it is too slow for the time limit.")
+        elif b["error"]:
+            parts.append(f"TIMING: on a maximum-size input the solution crashed: {b['error'][:200]}")
+        else:
+            parts.append(f"TIMING: maximum-size input solved in {b['seconds']} s (limit about {STRESS_TIME_LIMIT:g} s).")
+    return "[" + " ".join(parts) + "] " if parts else ""
+
+
 def _restore_best(ws, tests, best_passing, log):
     """Return the last solution that passed every public sample if the final one does not."""
     if not best_passing:
@@ -481,6 +593,7 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
 
     iters, prev_desc = 0, None
     best_passing = None
+    stress_overrides = 0
     while status == "continue" and next_desc and iters < MAX_ITERS:
         if prev_desc is not None and next_desc.strip().lower() == prev_desc.strip().lower():
             log(f"    [primary] reissued the same task; no progress, stopping after {iters} iters")
@@ -489,14 +602,17 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
         iters += 1
         task = {"id": iters, "desc": next_desc, "status": "in_progress", "result": ""}
         _, nexts, summary, wrote = _worker(problem_text, spec, ws, task, log)
-        res = None
+        res, st = None, None
         if spec["kind"] == "code" and tests and wrote:
             res = _run_samples(ws, tests)
             if res.get("ran"):
                 res["multi"] = FIXES and MULTI_OK.search(problem_text) is not None
-                if FIXES and res["passed"] == res["total"]:
+                st = _stress_check(ws, res["multi"]) if (FIXES and EXEC) else None
+                if FIXES and res["passed"] == res["total"] and not (st and (st.get("mismatch") or _too_slow(st))):
                     best_passing = _read(ws, "solution.py")
-                summary = _sample_feedback(res) + summary
+                summary = _sample_feedback(res) + _stress_feedback(st) + summary
+                if st and (st.get("ran") or st.get("skipped")):
+                    log(f"    [stress] mismatch={bool(st.get('mismatch'))} checked={st.get('checked')} big={st.get('big')}")
                 log(f"    [samples] {res['passed']}/{res['total']} public tests passed")
         status, next_desc, tasks = _primary_manage(
             problem_text, spec, ws, tasks, nexts, summary, log)
@@ -506,6 +622,14 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
             if not next_desc:
                 next_desc = "The solution fails the public sample tests; fix it or try a different approach."
             log("    [primary-manage] overriding 'done' -- sample tests still failing")
+        elif (FIXES and EXEC and st and status == "done" and stress_overrides < 2
+                and (st.get("mismatch") or _too_slow(st))):
+            stress_overrides += 1
+            status = "continue"
+            if not next_desc:
+                next_desc = ("The stress test found a disagreement with the brute force or a too-slow "
+                             "solution; resolve it.")
+            log("    [primary-manage] overriding 'done' -- stress test disagrees or the solution is too slow")
         _save_tasks(ws, tasks)
 
     if status == "done" and _has_answer(ws, spec):
