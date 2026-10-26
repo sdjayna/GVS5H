@@ -26,9 +26,9 @@ def main():
     from lcb_runner.benchmarks.code_generation import load_code_generation_dataset
     by = {p.question_id: p for p in load_code_generation_dataset(release_version="release_v6")}
     ids = json.load(open(os.path.join(HERE, "lcb100_hardest_v6.json")))[:100]
-    expected = {"abc396_e", "abc397_d", "abc398_f", "arc191_c", "arc190_a", "arc192_b"}
+    expected = {"abc396_e", "abc397_d", "abc398_f", "arc191_c", "arc190_a", "arc192_b", "arc195_c"}
     matched = {q for q in ids if ma.MULTI_OK.search(run_bench.build_code_prompt(by[q]))}
-    check(f"detector matches exactly the 6 known problems (matched {sorted(matched)})", matched == expected)
+    check(f"detector matches exactly the 7 known problems (matched {sorted(matched)})", matched == expected)
 
     # 3. sample check and feedback
     Test = lambda i, o: types.SimpleNamespace(testtype="stdin", input=i, output=o)

@@ -91,6 +91,8 @@ def openai_chat(url, api_key, model, messages, temperature=0.2, extra=None, meta
         base["temperature"] = temperature
     if CLOUD_MAX_TOKENS > 0:
         base[token_param] = CLOUD_MAX_TOKENS
+    if (meta or {}).get("max_tokens_override"):
+        base[token_param] = int(meta["max_tokens_override"])
     if extra:
         base.update(extra)
     prov0 = dict(base.get("provider") or {})

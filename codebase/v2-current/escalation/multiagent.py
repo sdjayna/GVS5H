@@ -11,6 +11,7 @@ import time
 import json
 import hashlib
 import subprocess
+import ast
 
 from orchestrator import chat
 
@@ -65,6 +66,7 @@ def _record(ws, rec):
 
 
 ROLE_EFFORT = dict(p.split("=", 1) for p in os.environ.get("MULTIAGENT_ROLE_EFFORT", "").split(",") if "=" in p)
+ROLE_MAX_TOKENS = dict(p.split("=", 1) for p in os.environ.get("MULTIAGENT_ROLE_MAX_TOKENS", "").split(",") if "=" in p)
 
 
 def _chat(ws, role, messages, temperature, meta=None):
@@ -72,6 +74,9 @@ def _chat(ws, role, messages, temperature, meta=None):
     effort = ROLE_EFFORT.get(role.split(":")[0])
     if effort:
         m["reasoning_effort_override"] = effort
+    cap = ROLE_MAX_TOKENS.get(role.split(":")[0])
+    if cap:
+        m["max_tokens_override"] = int(cap)
     resp = chat(MODEL, messages, temperature=temperature, meta=m)
     _record(ws, {"t": time.time(), "role": role, "request": messages, "response": resp,
                  "reasoning": m.get("reasoning"), "thinking_blocks": m.get("thinking_blocks"),
@@ -186,7 +191,8 @@ EXEC_FMT = (
 MULTI_OK = re.compile(
     r"(print(ing)?|output(ting)?)\s+any\b|any\s+(one\s+)?of\s+them\s+(is|are|will\s+be|may\s+be)"
     r"|if\s+there\s+are\s+multiple\s+(solutions|answers|ways|such|good|valid)"
-    r"|if\s+multiple\s+solutions\s+exist|case-insensitive",
+    r"|if\s+multiple\s+solutions\s+exist|case-insensitive"
+    r"|show\s+one\s+example|print\s+(one\s+)?such\s+a\s+(placement|construction|sequence|arrangement)\b",
     re.I,
 )
 MAX_ANSWER_CHARS = 20000
@@ -560,6 +566,51 @@ def _stress_feedback(st):
     return "[" + " ".join(parts) + "] " if parts else ""
 
 
+HARVEST_NOTE = (" [HARVEST: a complete program written during an earlier step passes every public "
+                "sample and is now the current solution. Verify it rather than rewrite it.]")
+HARVEST_MAX_TRIES = 4
+
+
+def _harvest_code(ws, spec, tests, log, source):
+    """Keep a program a bookkeeping step wrote anyway, if it passes every public sample."""
+    if not (FIXES and EXEC and tests and spec.get("kind") == "code"):
+        return None
+    cur = _read(ws, "solution.py")
+    if cur.strip():
+        r = _run_samples(ws, tests)
+        if r.get("ran") and r["passed"] == r["total"]:
+            return None
+    try:
+        recs = [json.loads(l) for l in open(os.path.join(ws, "transcript.jsonl")) if l.strip()]
+    except OSError:
+        return None
+    last = recs[-1] if recs else {}
+    if last.get("role") not in ("primary_plan", "ideation", "primary_manage"):
+        return None
+    blocks = []
+    for text in (last.get("response") or "", last.get("reasoning") or ""):
+        blocks += list(reversed(re.findall(r"```python[ \t]*\n(.*?)```", text, re.DOTALL)))
+    tries = 0
+    for code in blocks:
+        code = code.strip()
+        if len(code) < 80:
+            continue
+        try:
+            ast.parse(code)
+        except SyntaxError:
+            continue
+        tries += 1
+        _write(ws, "solution.py", code)
+        r = _run_samples(ws, tests)
+        if r.get("ran") and r["passed"] == r["total"]:
+            log(f"    [harvest] {source} wrote a program that passes all {r['total']} public samples; kept it")
+            return code
+        _write(ws, "solution.py", cur)
+        if tries >= HARVEST_MAX_TRIES:
+            break
+    return None
+
+
 def _restore_best(ws, tests, best_passing, log):
     """Return the last solution that passed every public sample if the final one does not."""
     if not best_passing:
@@ -586,13 +637,17 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
                  "kind": spec["kind"], "max_iters": MAX_ITERS, "problem": problem_text})
 
     tasks = _primary_plan(problem_text, spec, ws, log)
+    harvested = _harvest_code(ws, spec, tests, log, "the planning step")
     proposals = _ideation_worker(problem_text, spec, ws, log)
+    harvested = _harvest_code(ws, spec, tests, log, "the approach step") or harvested
     status, next_desc, tasks = _primary_manage(
-        problem_text, spec, ws, tasks, proposals, "ideation complete", log)
+        problem_text, spec, ws, tasks, proposals,
+        "ideation complete" + (HARVEST_NOTE if harvested else ""), log)
+    harvested = _harvest_code(ws, spec, tests, log, "the manager") or harvested
     _save_tasks(ws, tasks)
 
     iters, prev_desc = 0, None
-    best_passing = None
+    best_passing = harvested
     stress_overrides = 0
     while status == "continue" and next_desc and iters < MAX_ITERS:
         if prev_desc is not None and next_desc.strip().lower() == prev_desc.strip().lower():
@@ -616,6 +671,7 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
                 log(f"    [samples] {res['passed']}/{res['total']} public tests passed")
         status, next_desc, tasks = _primary_manage(
             problem_text, spec, ws, tasks, nexts, summary, log)
+        best_passing = _harvest_code(ws, spec, tests, log, "the manager") or best_passing
         if (res and res.get("ran") and res["passed"] < res["total"] and status == "done"
                 and not (res.get("multi") and not res.get("errors"))):
             status = "continue"
