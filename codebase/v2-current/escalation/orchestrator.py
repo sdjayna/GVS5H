@@ -39,7 +39,7 @@ CLAUDE_ATTEMPTS = int(os.environ.get("ESCALATION_CLAUDE_ATTEMPTS", "3"))
 # --- first-party providers -------------------------------------------------
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+OPENAI_URL = os.environ.get("ESCALATION_OPENAI_BASE", "https://api.openai.com/v1/chat/completions")
 OPENAI_REASONING = os.environ.get("ESCALATION_OPENAI_REASONING", "")
 
 DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
