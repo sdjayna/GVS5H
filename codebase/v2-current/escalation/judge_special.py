@@ -2,6 +2,10 @@
 correct output. LiveCodeBench's grader compares output text exactly, so on these problems it can
 reject a correct answer. Each judge decides from the problem statement, not from the expected file.
 
+The paper's appendix ("Two corrections to the LiveCodeBench evaluator") already judges abc396_e,
+arc190_a, arc195_c and abc385_f by the contest's rule; those judges are re-implemented here so
+that new runs can be scored the same way. abc397_d, abc398_f, arc191_c and arc192_b are additions.
+
 Grader faults this corrects:
 - abc396_e, abc398_f, abc397_d, arc191_c, arc190_a: "any of them is accepted" (or equivalent).
 - arc192_b: the judge is case-insensitive.
