@@ -346,7 +346,8 @@ def chat(model, messages, temperature=0.2, num_ctx=16384, meta=None):
             raise RuntimeError("OPENAI_API_KEY not set but model uses an openai: prefix")
         name = model[len("openai:"):]
         gpt5 = name.startswith("gpt-5")
-        extra = {"reasoning_effort": OPENAI_REASONING} if OPENAI_REASONING else None
+        effort = (meta or {}).get("reasoning_effort_override") or OPENAI_REASONING
+        extra = {"reasoning_effort": effort} if effort else None
         return openai_chat(OPENAI_URL, OPENAI_API_KEY, name, messages, temperature, extra, meta,
                            token_param="max_completion_tokens" if gpt5 else "max_tokens",
                            send_temperature=not gpt5)

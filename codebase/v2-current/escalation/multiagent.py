@@ -64,8 +64,14 @@ def _record(ws, rec):
         f.write(json.dumps(rec) + "\n")
 
 
+ROLE_EFFORT = dict(p.split("=", 1) for p in os.environ.get("MULTIAGENT_ROLE_EFFORT", "").split(",") if "=" in p)
+
+
 def _chat(ws, role, messages, temperature, meta=None):
     m = meta if meta is not None else {}
+    effort = ROLE_EFFORT.get(role.split(":")[0])
+    if effort:
+        m["reasoning_effort_override"] = effort
     resp = chat(MODEL, messages, temperature=temperature, meta=m)
     _record(ws, {"t": time.time(), "role": role, "request": messages, "response": resp,
                  "reasoning": m.get("reasoning"), "thinking_blocks": m.get("thinking_blocks"),
