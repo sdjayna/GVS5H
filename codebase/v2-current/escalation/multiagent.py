@@ -145,6 +145,26 @@ def _parse_tasks(text):
 
 
 ANS_RE = re.compile(r"ANSWER:\s*\S", re.I)
+
+FIXES = os.environ.get("MULTIAGENT_HARNESS_FIXES") == "1"
+WORKER_LIMITS = (
+    "Workers cannot run code, scripts or tools, and cannot read or write any file except "
+    "the solution. The only execution is the harness running the solution on the public "
+    "samples after each worker. Never assign a task that needs anything run, generated or "
+    "checked by a program; ask for reasoning, a proof, a complexity argument, a hand-traced "
+    "example or code changes instead."
+)
+WORKER_SELF_LIMITS = (
+    "You cannot run code or scripts; the harness runs your final program on the public "
+    "samples after you reply. Verify by reasoning and hand-traced examples, and never claim "
+    "to have executed anything."
+)
+MULTI_OK = re.compile(
+    r"(print(ing)?|output(ting)?)\s+any\b|any\s+(one\s+)?of\s+them\s+(is|are|will\s+be|may\s+be)"
+    r"|if\s+there\s+are\s+multiple\s+(solutions|answers|ways|such|good|valid)"
+    r"|if\s+multiple\s+solutions\s+exist|case-insensitive",
+    re.I,
+)
 MAX_ANSWER_CHARS = 20000
 MAX_PLAN_CHARS = 4000
 
@@ -185,6 +205,8 @@ def _primary_plan(problem, spec, ws, log):
     )
     if _strict():
         sys += _format_rule("PLAN", "TASKS")
+    if FIXES and kind == "code":
+        sys += "\n" + WORKER_LIMITS
     reply = _chat(ws, "primary_plan", [
         {"role": "system", "content": sys},
         {"role": "user", "content": problem},
@@ -252,6 +274,8 @@ def _primary_manage(problem, spec, ws, tasks, proposals, last_summary, log):
     )
     if _strict():
         sys += _format_rule("STATUS", "NEXT", "TASKS")
+    if FIXES and kind == "code":
+        sys += "\n" + WORKER_LIMITS
     reply = _chat(ws, "primary_manage", [
         {"role": "system", "content": sys},
         {"role": "user", "content": (
@@ -328,6 +352,8 @@ def _worker(problem, spec, ws, task, log, finalize=False):
         "for that approach instead of patching the stuck one. "
         f"Respond with EXACTLY these sections:\n{out_fmt}"
     )
+    if FIXES and kind == "code":
+        sys += "\n" + WORKER_SELF_LIMITS
     wmeta = {}
     reply = _chat(ws, "finalize" if finalize else f"worker:{task['id']}", [
         {"role": "system", "content": sys},
@@ -378,7 +404,7 @@ def _run_samples(ws, tests):
     if not code.strip() or not stdin_tests:
         return {"ran": False}
     sol = os.path.join(ws, "solution.py")
-    passed, fail = 0, None
+    passed, fail, errors = 0, None, 0
     for t in stdin_tests:
         inp = getattr(t, "input", "") or ""
         exp = (getattr(t, "output", "") or "").strip()
@@ -393,11 +419,13 @@ def _run_samples(ws, tests):
             got = "<timed out (>10s)>"
         except Exception as e:
             got = f"<error: {e}>"
+        if got.startswith("<"):
+            errors += 1
         if got == exp:
             passed += 1
         elif fail is None:
             fail = {"input": inp[:600], "expected": exp[:400], "got": got[:400]}
-    return {"ran": True, "passed": passed, "total": len(stdin_tests), "fail": fail}
+    return {"ran": True, "passed": passed, "total": len(stdin_tests), "fail": fail, "errors": errors}
 
 
 def _sample_feedback(res):
@@ -406,11 +434,30 @@ def _sample_feedback(res):
     if res["passed"] == res["total"]:
         return f"[SAMPLE TESTS: PASSED all {res['total']} public samples -- the solution looks correct.] "
     f = res.get("fail") or {}
+    if res.get("multi") and not res.get("errors"):
+        return ("[SAMPLE TESTS: OUTPUT DIFFERS from the sample answer on {d}/{t} cases. This problem "
+                "accepts more than one correct output, so a difference is not by itself an error. "
+                "First differing case: input={i!r} sample answer={e!r} got={g!r}. Check that the "
+                "output meets every requirement in the statement.] ").format(
+                    d=res["total"] - res["passed"], t=res["total"], i=f.get("input", ""),
+                    e=f.get("expected", ""), g=f.get("got", ""))
     return ("[SAMPLE TESTS: FAILED -- passed {p}/{t}. The current solution is WRONG. First failing "
             "case: input={i!r} expected={e!r} got={g!r}. Fix the bug or, if this approach keeps "
             "failing, switch to a DIFFERENT approach.] ").format(
                 p=res["passed"], t=res["total"], i=f.get("input", ""),
                 e=f.get("expected", ""), g=f.get("got", ""))
+
+
+def _restore_best(ws, tests, best_passing, log):
+    """Return the last solution that passed every public sample if the final one does not."""
+    if not best_passing:
+        return False
+    final = _run_samples(ws, tests)
+    if final.get("ran") and final["passed"] == final["total"]:
+        return False
+    _write(ws, "solution.py", best_passing)
+    log("    [keep-best] final solution fails the public samples; restored the last one that passed them all")
+    return True
 
 
 # --- public entry point ----------------------------------------------------
@@ -433,6 +480,7 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
     _save_tasks(ws, tasks)
 
     iters, prev_desc = 0, None
+    best_passing = None
     while status == "continue" and next_desc and iters < MAX_ITERS:
         if prev_desc is not None and next_desc.strip().lower() == prev_desc.strip().lower():
             log(f"    [primary] reissued the same task; no progress, stopping after {iters} iters")
@@ -445,11 +493,15 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
         if spec["kind"] == "code" and tests and wrote:
             res = _run_samples(ws, tests)
             if res.get("ran"):
+                res["multi"] = FIXES and MULTI_OK.search(problem_text) is not None
+                if FIXES and res["passed"] == res["total"]:
+                    best_passing = _read(ws, "solution.py")
                 summary = _sample_feedback(res) + summary
                 log(f"    [samples] {res['passed']}/{res['total']} public tests passed")
         status, next_desc, tasks = _primary_manage(
             problem_text, spec, ws, tasks, nexts, summary, log)
-        if res and res.get("ran") and res["passed"] < res["total"] and status == "done":
+        if (res and res.get("ran") and res["passed"] < res["total"] and status == "done"
+                and not (res.get("multi") and not res.get("errors"))):
             status = "continue"
             if not next_desc:
                 next_desc = "The solution fails the public sample tests; fix it or try a different approach."
@@ -460,6 +512,9 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
         log("    [finalize] skipped (primary marked done)")
     else:
         _worker(problem_text, spec, ws, {"id": 0, "desc": "finalize"}, log, finalize=True)
+
+    if FIXES and spec["kind"] == "code" and tests:
+        _restore_best(ws, tests, best_passing, log)
 
     if status_out is not None:
         status_out["ws"] = ws
