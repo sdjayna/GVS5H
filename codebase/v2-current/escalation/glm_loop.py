@@ -51,6 +51,7 @@ BUDGETS = {
     "checker": 32000,    # thinking on, as the brute force
     "classify": 16,
     "hand": 32000,       # a tiny input worked by hand; a fifth of the derive budget
+    "fix": 32000,        # a fix needs room to debug first; thinking on, like the verifiers
 }
 BUDGETS.update({k: int(v) for k, v in (p.split("=", 1) for p in os.environ.get("LOOP_BUDGETS", "").split(",") if "=" in p)})
 
@@ -255,9 +256,12 @@ def derive(ws, problem, history):
 def implement(ws, problem, method, prev, failure, fn):
     user = f"{problem}\n\n{_io_note(fn)}\n\nMETHOD:\n{method}\n"
     if prev and failure:
+        # A fix needs room to work out what went wrong. With thinking off, GLM debugged in the reply itself
+        # (13,537 characters on abc390_g) and its own code fence then triggered the stop: no program. With
+        # thinking on it debugs in its reasoning and the prefilled reply is the program.
         user += f"\nThe current program:\n```python\n{prev}```\nIt {failure}\nFix it."
-    else:
-        user += "\nImplement this method."
+        return _code_call(ws, "implement", CODE_SYS, user, BUDGETS["fix"], thinking=True)
+    user += "\nImplement this method."
     return _code_call(ws, "implement", CODE_SYS, user, BUDGETS["implement"])
 
 
@@ -387,7 +391,7 @@ def loop_solve(problem_text, spec, log=None, status_out=None, tests=None):
     starter = re.search(r"```python\n(.*?)```", problem_text, re.S)
     fn = _fn_name(starter.group(1)) if starter else None
     state = {"fn": fn, "tests": [t for t in (tests or []) if str(getattr(t, "testtype", "")).lower().endswith(("stdin", "functional"))],
-             "unique": True, "adjudications": 0}
+             "unique": True, "adjudications": 0, "settled": set()}
     build_verifiers(ws, state, problem_text)
     log(f"    [loop] verifiers: unique={state['unique']} gen={bool(state.get('gen'))} "
         f"brute={bool(state.get('brute'))} checker={bool(state.get('checker'))}"
@@ -408,8 +412,10 @@ def loop_solve(problem_text, spec, log=None, status_out=None, tests=None):
             continue
         code = new
         ok, failure, d = test(state, code)
-        while not ok and d.get("dispute") and state["adjudications"] < MAX_ADJUDICATIONS:
+        while (not ok and d.get("dispute") and state["adjudications"] < MAX_ADJUDICATIONS
+               and d["dispute"]["input"] not in state["settled"]):
             state["adjudications"] += 1
+            state["settled"].add(d["dispute"]["input"])   # an input is adjudicated once
             if adjudicate(ws, state, problem_text, d["dispute"], log) == "program":
                 break
             ok, failure, d = test(state, code)   # re-test against the corrected or dropped comparison

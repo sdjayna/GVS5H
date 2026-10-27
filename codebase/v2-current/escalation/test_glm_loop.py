@@ -91,6 +91,10 @@ def main():
           "reasoning_effort" not in bru and bru["messages"][-1]["content"] == gl.FENCE_OPEN and bru["stop"] == [gl.FENCE_STOP])
     gen = [b for s, b in srv.bodies if s == "gen"][0]
     check("gen requests: thinking off", gen["reasoning_effort"] == "none")
+    impls = [b for s, b in srv.bodies if s == "implement"]
+    check("fix requests think (first implementation does not), still prefilled and stopped",
+          impls[0].get("reasoning_effort") == "none" and "reasoning_effort" not in impls[1]
+          and impls[1]["messages"][-1]["content"] == gl.FENCE_OPEN and impls[1]["max_tokens"] == gl.BUDGETS["fix"])
     der = [b for s, b in srv.bodies if s == "derive"][0]
     check("derive requests: thinking on, no prefill, no stop", "reasoning_effort" not in der and "stop" not in der
           and der["messages"][-1]["role"] == "user")
@@ -206,6 +210,15 @@ def main():
                                      "derive": ["METHOD:\nformula"], "implement": [GOOD]})
     check("unrepairable generator: dropped, logged, no silent comparisons",
           any("generator unusable" in l for l in lines) and any("[stress] None" in l for l in lines))
+
+    # 14. the same disputed input in two rounds is adjudicated once (3674, 27 Oct)
+    STUBBORN = "n = int(input())\nprint(n * (n + 1) // 2 + (1 if n == 21 else 0))\n"
+    ONE_GEN = "import sys\nprint(21 if sys.argv[2] == 'small' else 10 ** 6)\n"
+    srv, lines, status, out = solve({"classify": ["UNIQUE"], "gen": [ONE_GEN], "brute": [BRUTE], "brute2": [BRUTE],
+                                     "hand": [hand_right], "derive": ["METHOD:\nformula", "METHOD:\ntriangular"],
+                                     "implement": [STUBBORN, STUBBORN, GOOD]})
+    check("a dispute on the same input is settled once, not every round",
+          sum(s == "brute2" for s, _ in srv.bodies) == 1 and sum(s == "hand" for s, _ in srv.bodies) == 1)
 
     print(f"\n{'ALL PASS' if not fails else f'{fails} FAILED'}")
     sys.exit(1 if fails else 0)
