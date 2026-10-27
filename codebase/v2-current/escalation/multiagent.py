@@ -180,6 +180,13 @@ WORKER_SELF_LIMITS = (
 )
 EXEC = os.environ.get("MULTIAGENT_EXEC_CHECKS") == "1"
 SPLIT = os.environ.get("MULTIAGENT_IMPLEMENT_SPLIT") == "1"
+REQUIRE_STRESS = os.environ.get("MULTIAGENT_REQUIRE_STRESS") == "1"
+VERIFY_TASK = (
+    "IMPLEMENT: Verify the current solution before it is accepted. Repeat its CODE in full, changed only "
+    "if you find a bug, and write ### BRUTE (a slow but obviously correct solver for small inputs), "
+    "### GEN (one random small valid input, seeded with int(sys.argv[1])) and ### BIGGEN (one "
+    "maximum-size valid input). The harness runs them against the solution."
+)
 IMPLEMENT_TAG = "IMPLEMENT:"
 MANAGE_SPLIT = (
     "Two kinds of worker task. Normal tasks get a worker that reasons at length. If the method is "
@@ -651,6 +658,19 @@ def _harvest_code(ws, spec, tests, log, source):
     return None
 
 
+def _verify_gate(status, next_desc, ws, spec, tests, problem_text, verified_code, n, log):
+    """Refuse 'done' on a code solution that has never passed a stress test (at most twice)."""
+    if not (FIXES and EXEC and REQUIRE_STRESS and tests and spec.get("kind") == "code"):
+        return status, next_desc, n
+    if status != "done" or n >= 2 or MULTI_OK.search(problem_text):
+        return status, next_desc, n
+    cur = _read(ws, "solution.py")
+    if not cur.strip() or cur == verified_code:
+        return status, next_desc, n
+    log("    [verify] overriding 'done' -- the solution has never passed a stress test")
+    return "continue", f"{VERIFY_TASK} (verification {n + 1} of 2)", n + 1
+
+
 def _restore_best(ws, tests, best_passing, log):
     """Return the last solution that passed every public sample if the final one does not."""
     if not best_passing:
@@ -684,6 +704,9 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
         problem_text, spec, ws, tasks, proposals,
         "ideation complete" + (HARVEST_NOTE if harvested else ""), log)
     harvested = _harvest_code(ws, spec, tests, log, "the manager") or harvested
+    verified_code, verify_overrides = None, 0
+    status, next_desc, verify_overrides = _verify_gate(
+        status, next_desc, ws, spec, tests, problem_text, verified_code, verify_overrides, log)
     _save_tasks(ws, tasks)
 
     iters, prev_desc = 0, None
@@ -703,6 +726,8 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
             if res.get("ran"):
                 res["multi"] = FIXES and MULTI_OK.search(problem_text) is not None
                 st = _stress_check(ws, res["multi"]) if (FIXES and EXEC) else None
+                if st and st.get("checked") and not st.get("mismatch") and not _too_slow(st):
+                    verified_code = _read(ws, "solution.py")
                 if FIXES and res["passed"] == res["total"] and not (st and (st.get("mismatch") or _too_slow(st))):
                     best_passing = _read(ws, "solution.py")
                 summary = _sample_feedback(res) + _stress_feedback(st) + summary
@@ -726,6 +751,8 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
                 next_desc = ("The stress test found a disagreement with the brute force or a too-slow "
                              "solution; resolve it.")
             log("    [primary-manage] overriding 'done' -- stress test disagrees or the solution is too slow")
+        status, next_desc, verify_overrides = _verify_gate(
+            status, next_desc, ws, spec, tests, problem_text, verified_code, verify_overrides, log)
         _save_tasks(ws, tasks)
 
     if status == "done" and _has_answer(ws, spec):
