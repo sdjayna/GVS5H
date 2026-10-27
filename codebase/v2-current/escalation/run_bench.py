@@ -532,7 +532,7 @@ def main():
     ap.add_argument("--ids-file", default=os.path.join(HERE, "lcb100_hardest_v6.json"))
     ap.add_argument("--out", default=os.path.join(RUNS, "results.json"))
     ap.add_argument("--only", choices=["lcb", "aime", "math500", "gpqa", "hle"], default=None)
-    ap.add_argument("--engine", choices=["escalate", "multiagent", "single"], default="escalate")
+    ap.add_argument("--engine", choices=["escalate", "multiagent", "single", "loop"], default="escalate")
     ap.add_argument("--parallel", type=int, default=PARALLEL, help="# problems solved concurrently")
     args = ap.parse_args()
     PARALLEL = args.parallel
@@ -546,6 +546,11 @@ def main():
         SOLVE = single_solve
         log(f"Engine: single-shot  model={MODEL}")
         out = {"engine": "single", "model": MODEL}
+    elif args.engine == "loop":
+        from glm_loop import loop_solve, MODEL, MAX_ROUNDS, BUDGETS
+        SOLVE = loop_solve
+        log(f"Engine: loop  model={MODEL}  max_rounds={MAX_ROUNDS}  budgets={BUDGETS}")
+        out = {"engine": "loop", "model": MODEL}
     else:
         log(f"Engine: escalate  ladder={LADDER}")
         out = {"engine": "escalate", "ladder": LADDER}
