@@ -35,7 +35,7 @@ class Server:
     def step_of(body):
         u = body["messages"][-2 if body["messages"][-1]["role"] == "assistant" else -1]["content"]
         for key, step in (("exactly one correct output", "classify"), ("Write a generator", "gen"),
-                          ("different method from the most obvious", "brute2"),
+                          ("different method from the most obvious", "brute2"), ("Work out by hand", "hand"),
                           ("simplest obviously correct", "brute"), ("Write a checker", "checker"),
                           ("was cut off", "summary"), ("Work out a correct algorithm", "derive"),
                           ("Implement this method", "implement"), ("Fix it", "implement")):
@@ -47,6 +47,8 @@ class Server:
         step = self.step_of(body)
         self.bodies.append((step, body))
         r = self.script[step].pop(0)
+        if callable(r):
+            r = r(body)
         text, finish, reasoning = (r, "stop", "") if isinstance(r, str) else r
         return {"choices": [{"message": {"content": text, "reasoning_content": reasoning}, "finish_reason": finish}],
                 "usage": {"completion_tokens": 100}}
@@ -149,8 +151,38 @@ def main():
     # 9. the program is the one that is wrong: two independent brute forces agree
     srv, lines, status, out = solve({"classify": ["UNIQUE"], "gen": [GEN], "brute": [BRUTE], "brute2": [BRUTE],
                                      "derive": ["METHOD:\nformula"], "implement": [OFF_BY_ONE, GOOD]})
-    check("dispute: two brute forces agree, the program is fixed",
-          code_of(out) == GOOD and any("two independent brute forces agree" in l for l in lines))
+    check("dispute: two brute forces agree (hand check unavailable), the program is fixed",
+          code_of(out) == GOOD)
+
+    def hand_right(body):
+        n = int(body["messages"][0]["content"].split("correct output for this input:\n", 1)[1].split()[0])
+        return f"Working it out: {n} * {n + 1} / 2.\nANSWER: {n * (n + 1) // 2}"
+
+    # 9b. no hand-worked answer: the two agreeing brute forces stand
+    srv, lines, status, out = solve({"classify": ["UNIQUE"], "gen": [GEN], "brute": [BRUTE], "brute2": [BRUTE],
+                                     "hand": [("", "length", "")], "derive": ["METHOD:\nformula"],
+                                     "implement": [OFF_BY_ONE, GOOD]})
+    check("no hand answer: the two brute forces stand and the wrong program is fixed",
+          code_of(out) == GOOD and any("the two brute forces stand" in l for l in lines))
+
+    # 10. both brute forces share one misreading (3697, 27 Oct): the hand-worked answer sides with the program
+    srv, lines, status, out = solve({"classify": ["UNIQUE"], "gen": [GEN], "brute": [BAD_BRUTE], "brute2": [BAD_BRUTE],
+                                     "hand": [hand_right],
+                                     "derive": ["METHOD:\nformula"], "implement": [GOOD]})
+    check("correlated brute forces: the hand-worked answer keeps the correct program",
+          code_of(out) == GOOD and any("hand-worked answer agrees with the program" in l for l in lines)
+          and sum(s == "implement" for s, _ in srv.bodies) == 1)
+    hand = [b for s, b in srv.bodies if s == "hand"]
+    check("the hand check runs with thinking on and is given the disputed input",
+          hand and "reasoning_effort" not in hand[0]
+          and int(hand[0]["messages"][0]["content"].split("correct output for this input:\n", 1)[1].split()[0]) > 20)
+
+    # 11. brute forces and the hand-worked answer agree: the program is wrong
+    srv, lines, status, out = solve({"classify": ["UNIQUE"], "gen": [GEN], "brute": [BRUTE], "brute2": [BRUTE],
+                                     "hand": [hand_right], "derive": ["METHOD:\nformula"],
+                                     "implement": [OFF_BY_ONE, GOOD]})
+    check("brute forces and hand agree: the program is fixed",
+          code_of(out) == GOOD and any("the hand-worked answer agree; the program is wrong" in l for l in lines))
 
     print(f"\n{'ALL PASS' if not fails else f'{fails} FAILED'}")
     sys.exit(1 if fails else 0)

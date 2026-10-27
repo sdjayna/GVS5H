@@ -50,6 +50,7 @@ BUDGETS = {
     "gen": 4000,
     "checker": 8000,
     "classify": 16,
+    "hand": 32000,       # a tiny input worked by hand; a fifth of the derive budget
 }
 BUDGETS.update({k: int(v) for k, v in (p.split("=", 1) for p in os.environ.get("LOOP_BUDGETS", "").split(",") if "=" in p)})
 
@@ -276,11 +277,34 @@ def adjudicate(ws, state, problem, dispute, log):
         log("    [loop] dispute: the second brute force agrees with the program; brute force replaced")
         return "brute"
     if vote is not None and same_output(vote, dispute["brute"], fn):
-        log("    [loop] dispute: two independent brute forces agree; the program is wrong")
+        # Two programs from the same model can share one misreading of the statement, so a third program
+        # is not an independent witness. Work the tiny input by hand instead: a different mode, not a
+        # different program.
+        hand = hand_answer(ws, problem, dispute["input"], fn)
+        if hand is not None and same_output(hand, dispute["program"], fn):
+            state["brute"] = None
+            log("    [loop] dispute: both brute forces agree, but the hand-worked answer agrees with the program; "
+                "the brute-force comparison is dropped for this problem")
+            return "brute"
+        if hand is not None and same_output(hand, dispute["brute"], fn):
+            log("    [loop] dispute: two brute forces and the hand-worked answer agree; the program is wrong")
+            return "program"
+        log("    [loop] dispute: no hand-worked answer agrees with the program; the two brute forces stand")
         return "program"
     state["brute"] = None
     log("    [loop] dispute: three different answers; the brute-force comparison is dropped for this problem")
     return None
+
+
+def hand_answer(ws, problem, inp, fn):
+    """The correct output for one tiny input, worked step by step with thinking on."""
+    fmt = "the JSON value the method returns" if fn else "exactly what the program must print"
+    text, _, finish, _ = _chat(ws, "hand", [{"role": "user", "content": (
+        f"{problem}\n\nWork out by hand, step by step, the correct output for this input:\n{inp}\n"
+        f"Check every condition in the statement. End with a line ANSWER: followed by {fmt}.")}],
+        BUDGETS["hand"], thinking=True)
+    m = list(re.finditer(r"ANSWER:\s*(.+)", text or ""))
+    return m[-1].group(1).strip() if (finish == "stop" and m) else None
 
 
 def build_verifiers(ws, state, problem):
