@@ -173,10 +173,11 @@ def test(state, code):
         passed += 1
     d["samples"] = f"{passed}/{len(state['tests'])}"
     if state.get("gen"):
-        checked = 0
+        checked = gen_fail = brute_fail = 0
         for seed in range(1, STRESS_CASES + 1):
             inp, _, _ = run(state["gen"], "", RUN_TIMEOUT, None, (str(seed), "small"))
             if not inp:
+                gen_fail += 1
                 continue
             out, _, err = run(code, inp, RUN_TIMEOUT, fn)
             if out is None:
@@ -187,6 +188,7 @@ def test(state, code):
                     continue
                 want, _, _ = run(state["brute"], inp, RUN_TIMEOUT, fn)
                 if want is None:
+                    brute_fail += 1
                     continue
                 if not same_output(out, want, fn):
                     d["stress"] = f"mismatch after {checked}"
@@ -197,7 +199,8 @@ def test(state, code):
                 d["stress"] = f"checker rejects after {checked}"
                 return False, f"the checker rejects its output on a generated input: input={inp[:400]!r} output={out.strip()[:300]!r}", d
             checked += 1
-        d["stress"] = f"{checked} agree"
+        d["stress"] = (f"{checked} agree" + (f", {gen_fail} generator failures" if gen_fail else "")
+                       + (f", {brute_fail} brute-force failures" if brute_fail else ""))
         big, _, _ = run(state["gen"], "", 30, None, ("0", "max"))
         if big:
             out, secs, err = run(code, big, TIME_LIMIT * 2, fn)
@@ -310,6 +313,23 @@ def hand_answer(ws, problem, inp, fn):
     return m[-1].group(1).strip() if (finish == "stop" and m) else None
 
 
+def _generator_problem(state):
+    """None if the generator produces inputs in both modes that the verifiers can run on; else the error."""
+    gen, fn = state.get("gen"), state["fn"]
+    if not gen:
+        return "no generator was written"
+    for seed, mode in ((1, "small"), (2, "small"), (3, "small"), (0, "max")):
+        inp, _, err = run(gen, "", 30, None, (str(seed), mode))
+        if not inp:
+            return f"`python gen.py {seed} {mode}` failed: {(err or 'no output')[:400]}"
+        if mode == "small" and state.get("brute"):
+            out, _, err = run(state["brute"], inp, RUN_TIMEOUT, fn)
+            if out is None:
+                return (f"the reference solution cannot run on its output for seed {seed} (input={inp[:200]!r}): "
+                        f"{(err or '')[:300]}")
+    return None
+
+
 def build_verifiers(ws, state, problem):
     fn = state["fn"]
     verdict, _, _, _ = _chat(ws, "classify", [{"role": "user", "content": (
@@ -339,6 +359,18 @@ def build_verifiers(ws, state, problem):
             thinking=True)
         ok = checker and all(_checker_ok({"checker": checker}, t.input, t.output) for t in state["tests"])
         state["checker"] = checker if ok else None
+    problem_found = _generator_problem(state)
+    if state.get("gen") and problem_found:
+        repaired, _ = _code_call(ws, "gen", CODE_SYS, (
+            f"{problem}\n\nThis input generator, run as `python gen.py SEED MODE` with MODE `small` or `max`, fails:\n"
+            f"{problem_found}\n\n```python\n{state['gen']}```\nWrite a corrected generator with the same interface "
+            "and output format."), BUDGETS["gen"])
+        state["gen"] = repaired or None
+        problem_found = _generator_problem(state) if repaired else "no repaired generator"
+        if problem_found:
+            state["gen"] = None
+        state["gen_repaired"] = not problem_found
+    state["gen_problem"] = problem_found
     for name in ("gen", "brute", "checker"):
         if state.get(name):
             with open(os.path.join(ws, name + ".py"), "w") as f:
@@ -358,7 +390,9 @@ def loop_solve(problem_text, spec, log=None, status_out=None, tests=None):
              "unique": True, "adjudications": 0}
     build_verifiers(ws, state, problem_text)
     log(f"    [loop] verifiers: unique={state['unique']} gen={bool(state.get('gen'))} "
-        f"brute={bool(state.get('brute'))} checker={bool(state.get('checker'))}")
+        f"brute={bool(state.get('brute'))} checker={bool(state.get('checker'))}"
+        + (" (generator repaired)" if state.get("gen_repaired") else "")
+        + (f" (generator unusable: {state['gen_problem'][:80]})" if state.get("gen_problem") else ""))
 
     history, method, code, failure, fixes, best = [], None, None, None, MAX_FIXES, None
     for rnd in range(1, MAX_ROUNDS + 1):

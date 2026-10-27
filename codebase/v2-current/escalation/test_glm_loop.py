@@ -34,7 +34,8 @@ class Server:
     @staticmethod
     def step_of(body):
         u = body["messages"][-2 if body["messages"][-1]["role"] == "assistant" else -1]["content"]
-        for key, step in (("exactly one correct output", "classify"), ("Write a generator", "gen"),
+        for key, step in (("exactly one correct output", "classify"), ("This input generator", "gen"),
+                          ("Write a generator", "gen"),
                           ("different method from the most obvious", "brute2"), ("Work out by hand", "hand"),
                           ("simplest obviously correct", "brute"), ("Write a checker", "checker"),
                           ("was cut off", "summary"), ("Work out a correct algorithm", "derive"),
@@ -188,6 +189,23 @@ def main():
                                      "implement": [OFF_BY_ONE, GOOD]})
     check("brute forces and hand agree: the program is fixed",
           code_of(out) == GOOD and any("the hand-worked answer agree; the program is wrong" in l for l in lines))
+
+    # 12. the generator crashes in small mode (3680, 27 Oct): it is repaired before any check relies on it
+    BROKEN_GEN = ("import random, sys\nrandom.seed(int(sys.argv[1]))\nif sys.argv[2] == 'small':\n    vals = random.randint(1, 30)\n"
+                  "else:\n    nums = 10 ** 6\nprint(nums)\n")
+    srv, lines, status, out = solve({"classify": ["UNIQUE"], "gen": [BROKEN_GEN, GEN], "brute": [BRUTE],
+                                     "derive": ["METHOD:\nformula"], "implement": [GOOD]})
+    repair = [b for s, b in srv.bodies if s == "gen"]
+    check("broken generator: repaired once, with its error quoted", len(repair) == 2 and "failed" in repair[1]["messages"][1]["content"]
+          and "NameError" in repair[1]["messages"][1]["content"])
+    check("broken generator: after the repair all 40 comparisons run", any("generator repaired" in l for l in lines)
+          and any("[stress] 40 agree" in l for l in lines))
+
+    # 13. the generator stays broken: it is dropped and the log says so
+    srv, lines, status, out = solve({"classify": ["UNIQUE"], "gen": [BROKEN_GEN, BROKEN_GEN], "brute": [BRUTE],
+                                     "derive": ["METHOD:\nformula"], "implement": [GOOD]})
+    check("unrepairable generator: dropped, logged, no silent comparisons",
+          any("generator unusable" in l for l in lines) and any("[stress] None" in l for l in lines))
 
     print(f"\n{'ALL PASS' if not fails else f'{fails} FAILED'}")
     sys.exit(1 if fails else 0)
