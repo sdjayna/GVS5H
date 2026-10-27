@@ -69,7 +69,21 @@ ROLE_EFFORT = dict(p.split("=", 1) for p in os.environ.get("MULTIAGENT_ROLE_EFFO
 ROLE_MAX_TOKENS = dict(p.split("=", 1) for p in os.environ.get("MULTIAGENT_ROLE_MAX_TOKENS", "").split(",") if "=" in p)
 
 
+RUNAWAY_RETRY = {r for r in os.environ.get("MULTIAGENT_RUNAWAY_RETRY", "").split(",") if r}
+
+
 def _chat(ws, role, messages, temperature, meta=None):
+    """One call; a bookkeeping call that ran to its limit is re-sampled once (MULTIAGENT_RUNAWAY_RETRY)."""
+    m = meta if meta is not None else {}
+    resp = _chat_once(ws, role, messages, temperature, m)
+    if role.split(":")[0] in RUNAWAY_RETRY and m.get("finish_reason") == "length":
+        print(f"    [runaway] {role} stopped at its token limit; re-sampling once", file=sys.stderr, flush=True)
+        m.clear()
+        resp = _chat_once(ws, role, messages, temperature, m)
+    return resp
+
+
+def _chat_once(ws, role, messages, temperature, meta=None):
     m = meta if meta is not None else {}
     effort = ROLE_EFFORT.get(role.split(":")[0])
     if effort:
