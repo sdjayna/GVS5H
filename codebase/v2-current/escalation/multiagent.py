@@ -103,7 +103,11 @@ def _chat_once(ws, role, messages, temperature, meta=None):
     sent = messages + [{"role": "assistant", "content": prefill}] if prefill else messages
     resp = chat(MODEL, sent, temperature=temperature, meta=m)
     if prefill:
-        resp = prefill + _strip_repeated_opening(resp)
+        cont = _strip_repeated_opening(resp)
+        if STRICT_CODE and re.match(r"\s*#{2,4}\s*(?!CODE\b)[A-Z]", cont or ""):
+            resp = cont   # the model skipped the code section: drop the dangling prefilled fence
+        else:
+            resp = prefill + cont
     _record(ws, {"t": time.time(), "role": role, "request": sent, "response": resp,
                  "reasoning": m.get("reasoning"), "thinking_blocks": m.get("thinking_blocks"),
                  # Anthropic returns a SUMMARY of the thinking; vLLM/DashScope return the real
@@ -195,6 +199,24 @@ SPLIT = os.environ.get("MULTIAGENT_IMPLEMENT_SPLIT") == "1"
 REQUIRE_STRESS = os.environ.get("MULTIAGENT_REQUIRE_STRESS") == "1"
 FULL_NEXT = os.environ.get("MULTIAGENT_FULL_NEXT") == "1"
 OVERRIDE_IMPLEMENT = os.environ.get("MULTIAGENT_OVERRIDE_IMPLEMENT") == "1"
+STRICT_CODE = os.environ.get("MULTIAGENT_STRICT_CODE") == "1"
+CODE_SECTIONS = ("CODE", "BRUTE", "GEN", "BIGGEN", "NOTES", "NEXT", "STATUS")
+
+
+def _has_statements(code):
+    try:
+        return bool(ast.parse(code).body)
+    except SyntaxError:
+        return False
+
+
+def _worker_code(sec, reply):
+    """The solution in a worker reply: the CODE section; the first fenced block only if the reply has
+    none of the expected sections; never a block without a statement."""
+    code = _extract_py(sec.get("CODE", ""))
+    if not code and not any(k in sec for k in CODE_SECTIONS):
+        code = _extract_py(reply)
+    return code if code and _has_statements(code) else ""
 AUTO_IMPLEMENT = os.environ.get("MULTIAGENT_AUTO_IMPLEMENT") == "1"
 MAX_NEXT_CHARS = 6000
 CODE_TASK_RE = re.compile(r"^\s*(?:(?:worker|task|step)\s*[\w-]{0,4}\s*[:.)-]\s*)?(?:re-?)?(?:write|implement|code)\b", re.I)
@@ -475,7 +497,8 @@ def _worker(problem, spec, ws, task, log, finalize=False):
     sec = _sections(reply)
     wrote = False
     if kind == "code":
-        code = _extract_py(sec.get("CODE", "")) or _extract_py(reply)
+        code = (_worker_code(sec, reply) if (FIXES and STRICT_CODE)
+                else (_extract_py(sec.get("CODE", "")) or _extract_py(reply)))
         if code:
             _write(ws, "solution.py", code)
             wrote = True
