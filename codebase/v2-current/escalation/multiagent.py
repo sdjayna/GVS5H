@@ -70,6 +70,8 @@ ROLE_MAX_TOKENS = dict(p.split("=", 1) for p in os.environ.get("MULTIAGENT_ROLE_
 
 
 RUNAWAY_RETRY = {r for r in os.environ.get("MULTIAGENT_RUNAWAY_RETRY", "").split(",") if r}
+IMPLEMENT_PREFILL = os.environ.get("MULTIAGENT_IMPLEMENT_PREFILL") == "1"
+PREFILL_TEXT = "### CODE\n```python\n"
 
 
 def _chat(ws, role, messages, temperature, meta=None):
@@ -91,8 +93,12 @@ def _chat_once(ws, role, messages, temperature, meta=None):
     cap = ROLE_MAX_TOKENS.get(role.split(":")[0])
     if cap:
         m["max_tokens_override"] = int(cap)
-    resp = chat(MODEL, messages, temperature=temperature, meta=m)
-    _record(ws, {"t": time.time(), "role": role, "request": messages, "response": resp,
+    prefill = PREFILL_TEXT if (IMPLEMENT_PREFILL and role.split(":")[0] == "implement") else ""
+    sent = messages + [{"role": "assistant", "content": prefill}] if prefill else messages
+    resp = chat(MODEL, sent, temperature=temperature, meta=m)
+    if prefill:
+        resp = prefill + (resp or "")
+    _record(ws, {"t": time.time(), "role": role, "request": sent, "response": resp,
                  "reasoning": m.get("reasoning"), "thinking_blocks": m.get("thinking_blocks"),
                  # Anthropic returns a SUMMARY of the thinking; vLLM/DashScope return the real
                  # chain of thought in the same `reasoning` field. Without this flag the two are
