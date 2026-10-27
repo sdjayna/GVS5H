@@ -165,6 +165,21 @@ WORKER_SELF_LIMITS = (
     "to have executed anything."
 )
 EXEC = os.environ.get("MULTIAGENT_EXEC_CHECKS") == "1"
+SPLIT = os.environ.get("MULTIAGENT_IMPLEMENT_SPLIT") == "1"
+IMPLEMENT_TAG = "IMPLEMENT:"
+MANAGE_SPLIT = (
+    "Two kinds of worker task. Normal tasks get a worker that reasons at length. If the method is "
+    "already worked out (in the NOTES, a cut-off summary or a proof) and the next worker only has to "
+    "write the program, start NEXT with \"IMPLEMENT:\" followed by the method in full (formulas, "
+    "cases, data structures, complexity). That worker writes the code directly with little reasoning "
+    "and a shorter output limit. Prefer IMPLEMENT after a worker was cut off at the token limit when "
+    "its summary contains the method."
+)
+IMPLEMENT_SELF = (
+    "Your task is to IMPLEMENT a method that is already worked out. Do not re-derive or re-prove it. "
+    "Write the complete program first, then keep any notes short. If the method is clearly wrong, "
+    "say so in NOTES in one or two sentences and still write your best program."
+)
 STRESS_CASES = int(os.environ.get("MULTIAGENT_STRESS_CASES", "40"))
 STRESS_TIME_LIMIT = float(os.environ.get("MULTIAGENT_STRESS_TIME_LIMIT", "6"))
 EXEC_LIMITS = (
@@ -306,6 +321,8 @@ def _primary_manage(problem, spec, ws, tasks, proposals, last_summary, log):
         sys += _format_rule("STATUS", "NEXT", "TASKS")
     if FIXES and kind == "code":
         sys += "\n" + (EXEC_LIMITS if EXEC else WORKER_LIMITS)
+    if FIXES and SPLIT and kind == "code":
+        sys += "\n" + MANAGE_SPLIT
     reply = _chat(ws, "primary_manage", [
         {"role": "system", "content": sys},
         {"role": "user", "content": (
@@ -385,8 +402,13 @@ def _worker(problem, spec, ws, task, log, finalize=False):
     )
     if FIXES and kind == "code":
         sys += "\n" + (EXEC_SELF if EXEC else WORKER_SELF_LIMITS)
+    implement = (FIXES and SPLIT and kind == "code" and not finalize
+                 and task.get("desc", "").lstrip().upper().startswith(IMPLEMENT_TAG))
+    if implement:
+        sys += "\n" + IMPLEMENT_SELF
     wmeta = {}
-    reply = _chat(ws, "finalize" if finalize else f"worker:{task['id']}", [
+    role = "finalize" if finalize else (f"implement:{task['id']}" if implement else f"worker:{task['id']}")
+    reply = _chat(ws, role, [
         {"role": "system", "content": sys},
         {"role": "user", "content": (
             f"PROBLEM:\n{problem}\n\nPLAN:\n{_read(ws, 'plan.md')}\n\n"
@@ -420,6 +442,10 @@ def _worker(problem, spec, ws, task, log, finalize=False):
     status = sec.get("STATUS", "continue").strip().lower()
     if wmeta.get("finish_reason") == "length" and not finalize:
         digest = _summarize_cutoff(ws, reply, task["desc"])
+        if FIXES and SPLIT and digest:
+            notes = _read(ws, "notes.md").rstrip()
+            entry = f"- **Cut-off worker summary (task {task['id']}):** {digest.strip()[:MAX_PLAN_CHARS]}"
+            _write(ws, "notes.md", (notes + "\n" if notes else "") + entry + "\n")
         summary = (f"worker EXCEEDED THE TOKEN LIMIT and was cut off before finishing task: "
                    f"{task['desc'][:80]}. No complete solution was produced -- the approach was "
                    f"too long to finish in one call, so prefer a simpler or different approach "
