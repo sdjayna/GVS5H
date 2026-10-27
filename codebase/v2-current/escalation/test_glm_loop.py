@@ -85,6 +85,11 @@ def main():
     check("implement requests: prefilled fence, stop at the closing fence, thinking off",
           impl["messages"][-1] == {"role": "assistant", "content": gl.FENCE_OPEN} and impl["stop"] == [gl.FENCE_STOP]
           and impl["reasoning_effort"] == "none")
+    bru = [b for s, b in srv.bodies if s == "brute"][0]
+    check("brute requests: thinking on, still prefilled and stopped at the closing fence",
+          "reasoning_effort" not in bru and bru["messages"][-1]["content"] == gl.FENCE_OPEN and bru["stop"] == [gl.FENCE_STOP])
+    gen = [b for s, b in srv.bodies if s == "gen"][0]
+    check("gen requests: thinking off", gen["reasoning_effort"] == "none")
     der = [b for s, b in srv.bodies if s == "derive"][0]
     check("derive requests: thinking on, no prefill, no stop", "reasoning_effort" not in der and "stop" not in der
           and der["messages"][-1]["role"] == "user")

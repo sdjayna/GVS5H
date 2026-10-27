@@ -46,9 +46,9 @@ BUDGETS = {
     "derive": 160000,    # covers the longest single-call answer that finished (149,764 tokens)
     "summary": 4000,     # summaries of cut-off reasoning used 529-2,000 characters of output
     "implement": 16000,  # successful code-only replies used 1,789-13,987 tokens
-    "brute": 8000,       # half the implement budget: a brute force is shorter than the solution
+    "brute": 32000,      # thinking on, like the hand check: a verifier needs a careful reading, not speed
     "gen": 4000,
-    "checker": 8000,
+    "checker": 32000,    # thinking on, as the brute force
     "classify": 16,
     "hand": 32000,       # a tiny input worked by hand; a fifth of the derive budget
 }
@@ -106,9 +106,11 @@ def clean_code(text):
         return ""
 
 
-def _code_call(ws, step, system, user, budget):
+def _code_call(ws, step, system, user, budget, thinking=False):
+    """A code-only call. Verifiers (brute, brute2, checker) think first: on the tuning set, thinking-off brute
+    forces were wrong on 4 of 6 problems where the thought-through solution was right on all 6."""
     text, _, finish, _ = _chat(ws, step, [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                               budget, thinking=False, prefill=FENCE_OPEN, stop=[FENCE_STOP])
+                               budget, thinking=thinking, prefill=FENCE_OPEN, stop=[FENCE_STOP])
     return clean_code(text), finish
 
 
@@ -264,7 +266,8 @@ def adjudicate(ws, state, problem, dispute, log):
     second, _ = _code_call(ws, "brute2", CODE_SYS, (
         f"{problem}\n\n{_io_note(fn)}\n\nWrite an obviously correct solution for small inputs only, using a "
         "different method from the most obvious one (for example direct simulation instead of search, or "
-        "exhaustive enumeration of every candidate answer). Speed does not matter; correctness does."), BUDGETS["brute"])
+        "exhaustive enumeration of every candidate answer). Speed does not matter; correctness does."), BUDGETS["brute"],
+        thinking=True)
     valid = second and all(same_output(run(second, t.input, RUN_TIMEOUT, fn)[0], t.output, fn) for t in state["tests"])
     if not valid:
         log("    [loop] dispute: no valid second brute force; the program is held to the first")
@@ -324,14 +327,16 @@ def build_verifiers(ws, state, problem):
     if state["unique"]:
         brute, _ = _code_call(ws, "brute", CODE_SYS, (
             f"{problem}\n\n{_io_note(fn)}\n\nWrite the simplest obviously correct solution, for small inputs only: "
-            "exhaustive search or direct simulation. Speed does not matter; correctness does."), BUDGETS["brute"])
+            "exhaustive search or direct simulation. Speed does not matter; correctness does."), BUDGETS["brute"],
+            thinking=True)
         ok = brute and all(same_output(run(brute, t.input, RUN_TIMEOUT, fn)[0], t.output, fn) for t in state["tests"])
         state["brute"] = brute if ok else None
     else:
         checker, _ = _code_call(ws, "checker", CODE_SYS, (
             f"{problem}\n\nWrite a checker. It is run as `python checker.py INPUT_FILE OUTPUT_FILE`, reads a test "
             "input and a program's output, and prints OK if the output is a correct answer for that input, "
-            "otherwise WRONG and a reason. Check every condition in the statement."), BUDGETS["checker"])
+            "otherwise WRONG and a reason. Check every condition in the statement."), BUDGETS["checker"],
+            thinking=True)
         ok = checker and all(_checker_ok({"checker": checker}, t.input, t.output) for t in state["tests"])
         state["checker"] = checker if ok else None
     for name in ("gen", "brute", "checker"):
