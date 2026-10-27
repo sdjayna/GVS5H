@@ -35,6 +35,7 @@ class Server:
     def step_of(body):
         u = body["messages"][-2 if body["messages"][-1]["role"] == "assistant" else -1]["content"]
         for key, step in (("exactly one correct output", "classify"), ("Write a generator", "gen"),
+                          ("different method from the most obvious", "brute2"),
                           ("simplest obviously correct", "brute"), ("Write a checker", "checker"),
                           ("was cut off", "summary"), ("Work out a correct algorithm", "derive"),
                           ("Implement this method", "implement"), ("Fix it", "implement")):
@@ -136,6 +137,20 @@ def main():
     check("multiple outputs: a valid different answer passes the checker", code_of(out) == neg and
           any("accepted" in l for l in lines))
     check("multiple outputs: no brute force is built", not any(s == "brute" for s, _ in srv.bodies))
+
+    # 8. the brute force is the one that is wrong (3697, 27 Oct): a second brute force outvotes it
+    BAD_BRUTE = "n = int(input())\nprint(sum(range(n + 1)) + (1 if n > 20 else 0))\n"
+    srv, lines, status, out = solve({"classify": ["UNIQUE"], "gen": [GEN], "brute": [BAD_BRUTE], "brute2": [BRUTE],
+                                     "derive": ["METHOD:\nformula"], "implement": [GOOD]})
+    check("dispute: a wrong brute force is replaced and the correct program accepted unchanged",
+          code_of(out) == GOOD and any("brute force replaced" in l for l in lines)
+          and sum(s == "implement" for s, _ in srv.bodies) == 1)
+
+    # 9. the program is the one that is wrong: two independent brute forces agree
+    srv, lines, status, out = solve({"classify": ["UNIQUE"], "gen": [GEN], "brute": [BRUTE], "brute2": [BRUTE],
+                                     "derive": ["METHOD:\nformula"], "implement": [OFF_BY_ONE, GOOD]})
+    check("dispute: two brute forces agree, the program is fixed",
+          code_of(out) == GOOD and any("two independent brute forces agree" in l for l in lines))
 
     print(f"\n{'ALL PASS' if not fails else f'{fails} FAILED'}")
     sys.exit(1 if fails else 0)

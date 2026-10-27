@@ -36,6 +36,7 @@ TIMEOUT = int(os.environ.get("ESCALATION_CLOUD_TIMEOUT", "21600"))
 WS_ROOT = os.environ.get("LOOP_WS", os.path.join(ROOT, "runs", "ws-loop"))
 MAX_ROUNDS = int(os.environ.get("LOOP_MAX_ROUNDS", "8"))
 MAX_FIXES = 2            # failed fixes in a row before the method is re-derived
+MAX_ADJUDICATIONS = 2    # disputes with the brute force settled by a second, independent brute force
 STRESS_CASES = 40        # generated small inputs per test
 TIME_LIMIT = 6.0         # seconds; LiveCodeBench's per-test limit
 RUN_TIMEOUT = 10.0       # seconds for one run of a brute force or a small case
@@ -186,6 +187,7 @@ def test(state, code):
                     continue
                 if not same_output(out, want, fn):
                     d["stress"] = f"mismatch after {checked}"
+                    d["dispute"] = {"input": inp, "brute": want, "program": out}
                     return False, (f"disagrees with the brute force on a generated input: input={inp[:400]!r} "
                                    f"brute={want.strip()[:300]!r} program={out.strip()[:300]!r}"), d
             elif not _checker_ok(state, inp, out):
@@ -253,6 +255,34 @@ def implement(ws, problem, method, prev, failure, fn):
     return _code_call(ws, "implement", CODE_SYS, user, BUDGETS["implement"])
 
 
+def adjudicate(ws, state, problem, dispute, log):
+    """The program and the brute force disagree: one of them is wrong. A second brute force, written
+    independently by a different method, votes on the disputed input. Returns "program", "brute" or None
+    (the side judged wrong). A wrong brute force is replaced; three-way disagreement drops the comparison."""
+    fn = state["fn"]
+    second, _ = _code_call(ws, "brute2", CODE_SYS, (
+        f"{problem}\n\n{_io_note(fn)}\n\nWrite an obviously correct solution for small inputs only, using a "
+        "different method from the most obvious one (for example direct simulation instead of search, or "
+        "exhaustive enumeration of every candidate answer). Speed does not matter; correctness does."), BUDGETS["brute"])
+    valid = second and all(same_output(run(second, t.input, RUN_TIMEOUT, fn)[0], t.output, fn) for t in state["tests"])
+    if not valid:
+        log("    [loop] dispute: no valid second brute force; the program is held to the first")
+        return "program"
+    vote, _, _ = run(second, dispute["input"], RUN_TIMEOUT, fn)
+    if vote is not None and same_output(vote, dispute["program"], fn):
+        state["brute"] = second
+        with open(os.path.join(ws, "brute.py"), "w") as f:
+            f.write(second)
+        log("    [loop] dispute: the second brute force agrees with the program; brute force replaced")
+        return "brute"
+    if vote is not None and same_output(vote, dispute["brute"], fn):
+        log("    [loop] dispute: two independent brute forces agree; the program is wrong")
+        return "program"
+    state["brute"] = None
+    log("    [loop] dispute: three different answers; the brute-force comparison is dropped for this problem")
+    return None
+
+
 def build_verifiers(ws, state, problem):
     fn = state["fn"]
     verdict, _, _, _ = _chat(ws, "classify", [{"role": "user", "content": (
@@ -296,7 +326,7 @@ def loop_solve(problem_text, spec, log=None, status_out=None, tests=None):
     starter = re.search(r"```python\n(.*?)```", problem_text, re.S)
     fn = _fn_name(starter.group(1)) if starter else None
     state = {"fn": fn, "tests": [t for t in (tests or []) if str(getattr(t, "testtype", "")).lower().endswith(("stdin", "functional"))],
-             "unique": True}
+             "unique": True, "adjudications": 0}
     build_verifiers(ws, state, problem_text)
     log(f"    [loop] verifiers: unique={state['unique']} gen={bool(state.get('gen'))} "
         f"brute={bool(state.get('brute'))} checker={bool(state.get('checker'))}")
@@ -315,6 +345,11 @@ def loop_solve(problem_text, spec, log=None, status_out=None, tests=None):
             continue
         code = new
         ok, failure, d = test(state, code)
+        while not ok and d.get("dispute") and state["adjudications"] < MAX_ADJUDICATIONS:
+            state["adjudications"] += 1
+            if adjudicate(ws, state, problem_text, d["dispute"], log) == "program":
+                break
+            ok, failure, d = test(state, code)   # re-test against the corrected or dropped comparison
         log(f"    [samples] {d['samples']} | [stress] {d['stress']} | time {d['time']}")
         if ok:
             best = code
