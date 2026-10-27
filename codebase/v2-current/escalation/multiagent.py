@@ -72,6 +72,12 @@ ROLE_MAX_TOKENS = dict(p.split("=", 1) for p in os.environ.get("MULTIAGENT_ROLE_
 RUNAWAY_RETRY = {r for r in os.environ.get("MULTIAGENT_RUNAWAY_RETRY", "").split(",") if r}
 IMPLEMENT_PREFILL = os.environ.get("MULTIAGENT_IMPLEMENT_PREFILL") == "1"
 PREFILL_TEXT = "### CODE\n```python\n"
+REPEATED_OPENING = re.compile(r"\A\s*(?:#{2,4}\s*CODE\s*\n)?\s*```[ \t]*(?:python|py)?[ \t]*\n")
+
+
+def _strip_repeated_opening(continuation):
+    """The model sometimes repeats the prefilled heading or fence; a second fence would close the first."""
+    return REPEATED_OPENING.sub("", continuation or "", count=1)
 
 
 def _chat(ws, role, messages, temperature, meta=None):
@@ -97,7 +103,7 @@ def _chat_once(ws, role, messages, temperature, meta=None):
     sent = messages + [{"role": "assistant", "content": prefill}] if prefill else messages
     resp = chat(MODEL, sent, temperature=temperature, meta=m)
     if prefill:
-        resp = prefill + (resp or "")
+        resp = prefill + _strip_repeated_opening(resp)
     _record(ws, {"t": time.time(), "role": role, "request": sent, "response": resp,
                  "reasoning": m.get("reasoning"), "thinking_blocks": m.get("thinking_blocks"),
                  # Anthropic returns a SUMMARY of the thinking; vLLM/DashScope return the real
