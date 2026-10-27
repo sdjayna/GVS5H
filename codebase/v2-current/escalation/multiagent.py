@@ -181,6 +181,24 @@ WORKER_SELF_LIMITS = (
 EXEC = os.environ.get("MULTIAGENT_EXEC_CHECKS") == "1"
 SPLIT = os.environ.get("MULTIAGENT_IMPLEMENT_SPLIT") == "1"
 REQUIRE_STRESS = os.environ.get("MULTIAGENT_REQUIRE_STRESS") == "1"
+FULL_NEXT = os.environ.get("MULTIAGENT_FULL_NEXT") == "1"
+AUTO_IMPLEMENT = os.environ.get("MULTIAGENT_AUTO_IMPLEMENT") == "1"
+MAX_NEXT_CHARS = 6000
+CODE_TASK_RE = re.compile(r"^\s*(?:(?:worker|task|step)\s*[\w-]{0,4}\s*[:.)-]\s*)?(?:re-?)?(?:write|implement|code)\b", re.I)
+
+
+def _next_task(next_text):
+    """The task the worker gets: the whole NEXT section, unless it is one bullet (FULL_NEXT)."""
+    text = (next_text or "").strip()
+    bullets = _bullets(text)
+    lines = [l for l in text.splitlines() if l.strip()]
+    if len(lines) == 1 and len(bullets) == 1:
+        return bullets[0]
+    return text[:MAX_NEXT_CHARS]
+
+
+def _is_code_task(desc):
+    return bool(CODE_TASK_RE.match(desc or ""))
 VERIFY_TASK = (
     "IMPLEMENT: Verify the current solution before it is accepted. Repeat its CODE in full, changed only "
     "if you find a bug, and write ### BRUTE (a slow but obviously correct solver for small inputs), "
@@ -358,7 +376,10 @@ def _primary_manage(problem, spec, ws, tasks, proposals, last_summary, log):
     status = "done" if sec.get("STATUS", "").strip().lower().startswith("done") else "continue"
     if status == "done" and not cur:  # invariant: can't be done with no answer produced yet
         status = "continue"
-    nxt = (_bullets(sec.get("NEXT", ""))[:1] or [sec.get("NEXT", "").strip()])[0]
+    if FIXES and FULL_NEXT:
+        nxt = _next_task(sec.get("NEXT", ""))
+    else:
+        nxt = (_bullets(sec.get("NEXT", ""))[:1] or [sec.get("NEXT", "").strip()])[0]
     nxt = re.sub(r"^[-*]\s*", "", nxt).strip()
     if status == "continue" and not nxt:  # manager wants to continue but named no task
         todo = [t for t in curated if t["status"] != "done"]
@@ -424,7 +445,8 @@ def _worker(problem, spec, ws, task, log, finalize=False):
     if FIXES and kind == "code":
         sys += "\n" + (EXEC_SELF if EXEC else WORKER_SELF_LIMITS)
     implement = (FIXES and SPLIT and kind == "code" and not finalize
-                 and task.get("desc", "").lstrip().upper().startswith(IMPLEMENT_TAG))
+                 and (task.get("desc", "").lstrip().upper().startswith(IMPLEMENT_TAG)
+                      or (AUTO_IMPLEMENT and _is_code_task(task.get("desc", "")))))
     if implement:
         sys += "\n" + IMPLEMENT_SELF
     wmeta = {}
