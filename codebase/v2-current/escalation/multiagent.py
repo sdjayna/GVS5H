@@ -194,6 +194,7 @@ EXEC = os.environ.get("MULTIAGENT_EXEC_CHECKS") == "1"
 SPLIT = os.environ.get("MULTIAGENT_IMPLEMENT_SPLIT") == "1"
 REQUIRE_STRESS = os.environ.get("MULTIAGENT_REQUIRE_STRESS") == "1"
 FULL_NEXT = os.environ.get("MULTIAGENT_FULL_NEXT") == "1"
+OVERRIDE_IMPLEMENT = os.environ.get("MULTIAGENT_OVERRIDE_IMPLEMENT") == "1"
 AUTO_IMPLEMENT = os.environ.get("MULTIAGENT_AUTO_IMPLEMENT") == "1"
 MAX_NEXT_CHARS = 6000
 CODE_TASK_RE = re.compile(r"^\s*(?:(?:worker|task|step)\s*[\w-]{0,4}\s*[:.)-]\s*)?(?:re-?)?(?:write|implement|code)\b", re.I)
@@ -692,6 +693,29 @@ def _harvest_code(ws, spec, tests, log, source):
     return None
 
 
+def _fix_samples_task(res):
+    f = (res or {}).get("fail") or {}
+    return ("IMPLEMENT: The current program fails the public samples "
+            f"({res.get('passed')}/{res.get('total')} pass). First failing case: input={f.get('input', '')[:300]!r} "
+            f"expected={f.get('expected', '')[:200]!r} got={f.get('got', '')[:200]!r}. Fix the program so this "
+            "case passes, keeping what already works. If the method itself is wrong, say so in NOTES in one "
+            "sentence and write the corrected program.")
+
+
+def _fix_stress_task(st):
+    m = (st or {}).get("mismatch")
+    if m:
+        return ("IMPLEMENT: The program disagrees with the brute force on a generated input: "
+                f"input={m['input'][:300]!r} brute={m['brute'][:200]!r} program={m['solution'][:200]!r}. "
+                "Work out by hand which is right on this input, then fix the program (or BRUTE, if BRUTE is "
+                "wrong). Keep BRUTE and GEN in your reply.")
+    b = (st or {}).get("big") or {}
+    return ("IMPLEMENT: The program is correct on the samples and generated inputs but too slow: on a "
+            f"maximum-size input ({b.get('input_chars')} characters) it took over {STRESS_TIME_LIMIT:g} s. Make it "
+            "faster without changing its answers: a better algorithm or data structure where one exists, "
+            "otherwise fast input and output, no recursion, and less work in the inner loops.")
+
+
 def _verify_gate(status, next_desc, ws, spec, tests, problem_text, verified_code, n, log):
     """Refuse 'done' on a code solution that has never passed a stress test (at most twice)."""
     if not (FIXES and EXEC and REQUIRE_STRESS and tests and spec.get("kind") == "code"):
@@ -775,15 +799,17 @@ def multiagent_solve(problem_text, spec, log=None, status_out=None, tests=None):
                 and not (res.get("multi") and not res.get("errors"))):
             status = "continue"
             if not next_desc:
-                next_desc = "The solution fails the public sample tests; fix it or try a different approach."
+                next_desc = (_fix_samples_task(res) if (FIXES and SPLIT and OVERRIDE_IMPLEMENT) else
+                             "The solution fails the public sample tests; fix it or try a different approach.")
             log("    [primary-manage] overriding 'done' -- sample tests still failing")
         elif (FIXES and EXEC and st and status == "done" and stress_overrides < 2
                 and (st.get("mismatch") or _too_slow(st))):
             stress_overrides += 1
             status = "continue"
             if not next_desc:
-                next_desc = ("The stress test found a disagreement with the brute force or a too-slow "
-                             "solution; resolve it.")
+                next_desc = (_fix_stress_task(st) if (FIXES and SPLIT and OVERRIDE_IMPLEMENT) else
+                             ("The stress test found a disagreement with the brute force or a too-slow "
+                              "solution; resolve it."))
             log("    [primary-manage] overriding 'done' -- stress test disagrees or the solution is too slow")
         status, next_desc, verify_overrides = _verify_gate(
             status, next_desc, ws, spec, tests, problem_text, verified_code, verify_overrides, log)
